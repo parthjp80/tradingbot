@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+data/paper_positions.json
+data/trade_journal.csv
+data/charts/
+logs/*.log*
+.pytest_cache/

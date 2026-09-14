@@ -1,0 +1,18 @@
+version: "3.8"
+
+services:
+  tradingbot:
+    build: .
+    container_name: nextgen-tradingbot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - BOT_DATA_FEED=live
+      - POLL_INTERVAL_MINUTES=30
+    volumes:
+      # bind-mount to a TrueNAS SCALE dataset so equity/position state and
+      # logs survive container rebuilds -- same pattern as your other
+      # Docker deployments (market-news, earnings-reaction-backtest)
+      - /mnt/<pool>/tradingbot/data:/app/data
+      - /mnt/<pool>/tradingbot/logs:/app/logs
