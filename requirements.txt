@@ -1,5 +1,11 @@
 pandas>=2.0.0
-numpy>=1.24.0
+# Pinned <2: NumPy 2.x manylinux wheels are built requiring the x86-64-v2
+# CPU baseline (SSE3/SSSE3/SSE4.1/SSE4.2/POPCNT). The k8s cluster's worker
+# nodes don't expose those flags (see `cat /proc/cpuinfo` on k8s-worker-2),
+# so a 2.x wheel crashes on import with "NumPy was built with baseline
+# optimizations: (X86_V2) but your machine doesn't support". 1.x wheels
+# still target the older SSE2-only baseline and run fine there.
+numpy>=1.24.0,<2
 yfinance>=0.2.40
 scipy>=1.11.0
 APScheduler>=3.10.0
