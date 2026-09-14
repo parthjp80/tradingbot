@@ -1,0 +1,57 @@
+# Scales the tradingbot Deployment to 1 replica shortly before the market
+# open (9:30 ET) and back to 0 shortly after the close (16:00 ET), per
+# main.py's is_market_hours() window. Weekdays only.
+#
+# deployment.yaml intentionally omits `replicas` so Flux's reconcile loop
+# never resets it out from under these CronJobs (see comment there).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: tradingbot-scale-up
+  namespace: trading
+  labels:
+    app: tradingbot
+    component: scaler
+spec:
+  schedule: "15 9 * * 1-5"
+  timeZone: "America/New_York"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          serviceAccountName: tradingbot-scaler
+          restartPolicy: Never
+          containers:
+            - name: scale-up
+              image: rancher/kubectl:v1.30.14
+              command: ["kubectl", "-n", "trading", "scale", "deployment/tradingbot", "--replicas=1"]
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: tradingbot-scale-down
+  namespace: trading
+  labels:
+    app: tradingbot
+    component: scaler
+spec:
+  schedule: "15 16 * * 1-5"
+  timeZone: "America/New_York"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          serviceAccountName: tradingbot-scaler
+          restartPolicy: Never
+          containers:
+            - name: scale-down
+              image: rancher/kubectl:v1.30.14
+              command: ["kubectl", "-n", "trading", "scale", "deployment/tradingbot", "--replicas=0"]

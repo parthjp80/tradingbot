@@ -1,0 +1,35 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Target namespace for every resource below. The "trading" namespace itself
+# is NOT created here — it's already owned/created by lowfloat_trader's
+# k8s/namespace.yaml on this cluster. Two Flux Kustomizations both trying to
+# manage the same Namespace object would fight over its labels every
+# reconcile. If you ever undeploy lowfloat_trader, add a namespace.yaml back
+# here first.
+namespace: trading
+
+resources:
+  - pvc.yaml
+  - deployment.yaml
+  - scale-rbac.yaml
+  - cronjob-scale.yaml
+
+# Generates ConfigMap/Secret with a content-hash suffix (e.g.
+# tradingbot-config-7gk9b2). Kustomize rewrites every reference to the
+# hashed name, so any edit to configmap.env or secret.env produces a new
+# object and the Deployment's pod spec changes — Kubernetes then rolls the
+# pod automatically, no manual restart needed.
+configMapGenerator:
+  - name: tradingbot-config
+    envs:
+      - configmap.env
+
+secretGenerator:
+  - name: tradingbot-secrets
+    envs:
+      - secret.env
+
+commonLabels:
+  app.kubernetes.io/name: tradingbot
+  app.kubernetes.io/managed-by: kustomize

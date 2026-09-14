@@ -1,0 +1,101 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tradingbot
+  namespace: trading
+  labels:
+    app: tradingbot
+spec:
+  # `replicas` is intentionally omitted so Flux never manages it via SSA.
+  # It's controlled solely by the tradingbot-scale-up/-down CronJobs
+  # (k8s/cronjob-scale.yaml), which toggle it 1/0 around market hours to
+  # save resources when the market's closed. Never raise it above 1 --
+  # main.py's internal scheduler and paper_broker's JSON state file assume
+  # a single writer; two replicas would race on paper_positions.json and
+  # could log duplicate/conflicting trades to the journal.
+  strategy:
+    type: Recreate          # never run two instances simultaneously
+  selector:
+    matchLabels:
+      app: tradingbot
+  template:
+    metadata:
+      labels:
+        app: tradingbot
+    spec:
+      terminationGracePeriodSeconds: 30
+
+      containers:
+        - name: tradingbot
+          image: ghcr.io/parthjp80/tradingbot:latest
+          imagePullPolicy: Always
+
+          # Load non-sensitive config from ConfigMap
+          envFrom:
+            - configMapRef:
+                name: tradingbot-config
+
+          # Load secrets individually (keeps them out of logs). Both are
+          # optional: only needed if BOT_BROKER_BACKEND=alpaca_paper. With
+          # the default internal_simulator backend the pod starts fine with
+          # neither set.
+          env:
+            - name: ALPACA_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: tradingbot-secrets
+                  key: ALPACA_API_KEY
+                  optional: true
+            - name: ALPACA_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: tradingbot-secrets
+                  key: ALPACA_SECRET_KEY
+                  optional: true
+
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            - name: logs
+              mountPath: /app/logs
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+          livenessProbe:
+            exec:
+              command:
+                - python3
+                - -c
+                - |
+                  import os, time
+                  log = '/app/logs/tradingbot.log'
+                  if not os.path.exists(log): exit(0)
+                  age = time.time() - os.path.getmtime(log)
+                  exit(0 if age < 300 else 1)  # unhealthy if no log write in 5 min
+            initialDelaySeconds: 60
+            periodSeconds: 120
+            failureThreshold: 3
+
+          readinessProbe:
+            exec:
+              command: ["test", "-f", "/app/data/paper_positions.json"]
+            initialDelaySeconds: 60
+            periodSeconds: 60
+
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: tradingbot-data
+        - name: logs
+          persistentVolumeClaim:
+            claimName: tradingbot-logs
+
+      # main.py handles market-hours gating internally; the scale-up/-down
+      # CronJobs additionally scale the Deployment to 0 outside that window.
+      restartPolicy: Always

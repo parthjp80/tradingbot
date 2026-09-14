@@ -1,0 +1,28 @@
+# Dynamically provisioned via the nfs-csi StorageClass (csi-driver-nfs),
+# backed by the same TrueNAS NFS export used by the rest of the cluster
+# (same pattern as lowfloat_trader/k8s/pvc.yaml). No static PV needed.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tradingbot-data
+  namespace: trading
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: nfs-csi
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tradingbot-logs
+  namespace: trading
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: nfs-csi
+  resources:
+    requests:
+      storage: 2Gi

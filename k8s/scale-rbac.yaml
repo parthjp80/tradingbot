@@ -1,0 +1,36 @@
+# Minimal permissions for the scale-up/-down CronJobs: only allowed to
+# read/scale this one Deployment, nothing else in the cluster.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tradingbot-scaler
+  namespace: trading
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tradingbot-scaler
+  namespace: trading
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["tradingbot"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    resourceNames: ["tradingbot"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: tradingbot-scaler
+  namespace: trading
+subjects:
+  - kind: ServiceAccount
+    name: tradingbot-scaler
+    namespace: trading
+roleRef:
+  kind: Role
+  name: tradingbot-scaler
+  apiGroup: rbac.authorization.k8s.io
