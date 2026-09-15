@@ -258,12 +258,61 @@ class AlpacaBroker:
             log.error("AlpacaBroker: order submission failed for %s: %s", symbol, e)
             return None
 
+        # Re-mark entry to a REAL quote-derived value before storing it.
+        # credit_or_debit is theoretical (Black-Scholes, pricing.py), but
+        # check_exits() marks positions to market using real Alpaca quotes.
+        # Keeping the theoretical value as entry_credit_or_debit means the
+        # very next check_exits() call compares a real mark against a
+        # theoretical basis -- any model/market gap reads as an immediate
+        # profit-target or stop-loss hit and triggers a close attempt on a
+        # position that was never even filled yet (Alpaca rejects it:
+        # "position intent mismatch, inferred: buy_to_open, specified:
+        # buy_to_close"). Pricing entry the same way exits are priced
+        # makes the two comparable from the first cycle on.
+        entry_credit_or_debit = credit_or_debit
+        try:
+            from alpaca.data.requests import OptionLatestQuoteRequest
+            leg_symbols = [c.symbol for c, _ in resolved]
+            quotes = self.data_client.get_option_latest_quote(
+                OptionLatestQuoteRequest(symbol_or_symbols=leg_symbols)
+            )
+            marked = 0.0
+            for contract, leg_side in resolved:
+                q = quotes.get(contract.symbol)
+                if q is None:
+                    raise ValueError(f"no quote for {contract.symbol}")
+                # same sign convention as credit_or_debit: selling a leg
+                # to open contributes what we'd receive (bid), buying a
+                # leg to open contributes what we'd pay (ask, negated).
+                marked += float(q.bid_price) if leg_side == "sell" else -float(q.ask_price)
+            entry_credit_or_debit = round(marked * 100, 2)  # per-contract dollars, matches credit_or_debit's *100 convention
+        except Exception as e:
+            log.warning(
+                "AlpacaBroker: could not mark %s entry to real quotes, falling back to theoretical "
+                "credit/debit (%.2f) -- exit checks this cycle may be less accurate: %s",
+                symbol, credit_or_debit, e,
+            )
+
+        # Multi-leg orders can fill asynchronously (README), and options
+        # orders don't fill at all outside market hours -- check_exits()
+        # must not attempt to close a position until this is confirmed
+        # True, or Alpaca rejects it ("position intent mismatch, inferred:
+        # buy_to_open, specified: buy_to_close"), since there's no actual
+        # position yet to close.
+        fill_confirmed = False
+        try:
+            fetched = self.trade_client.get_order_by_id(order.id)
+            fill_confirmed = getattr(fetched, "filled_avg_price", None) is not None
+        except Exception as e:
+            log.warning("AlpacaBroker: could not confirm fill status for %s (%s), assuming pending: %s", symbol, order.id, e)
+
         pos = Position(
             id=str(order.id),
             symbol=symbol,
             strategy=strategy,
             opened_at=datetime.utcnow(),
-            entry_credit_or_debit=credit_or_debit,  # theoretical at submission; see class docstring on fill reconciliation
+            entry_credit_or_debit=entry_credit_or_debit,  # real-quote-marked when available; see note above
+            broker_fill_confirmed=fill_confirmed,
             max_loss=max_loss,
             contracts=contracts,
             stop_loss_level=stop_loss_multiple,
@@ -364,6 +413,19 @@ class AlpacaBroker:
         for pos in list(self.risk_manager.open_positions):
             if not pos.broker_leg_symbols:
                 continue
+
+            if not pos.broker_fill_confirmed:
+                # Re-check in case it filled since the opening cycle --
+                # otherwise skip entirely rather than risk a close attempt
+                # against a position Alpaca doesn't consider open yet.
+                try:
+                    fetched = self.trade_client.get_order_by_id(pos.broker_order_id)
+                    pos.broker_fill_confirmed = getattr(fetched, "filled_avg_price", None) is not None
+                except Exception as e:
+                    log.warning("AlpacaBroker: could not re-check fill status for %s (%s): %s", pos.symbol, pos.broker_order_id, e)
+                if not pos.broker_fill_confirmed:
+                    log.info("AlpacaBroker: %s (%s) still has no confirmed fill, skipping exit check this cycle.", pos.symbol, pos.broker_order_id)
+                    continue
 
             leg_symbols = [leg["symbol"] for leg in pos.broker_leg_symbols]
             try:

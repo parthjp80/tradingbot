@@ -115,3 +115,10 @@ class Position:
     broker_name: str = "internal_simulator"
     broker_order_id: Optional[str] = None
     broker_leg_symbols: list = field(default_factory=list)  # real OCC option symbols, if applicable
+    # AlpacaBroker only: whether the opening order has a confirmed fill.
+    # Multi-leg orders can fill asynchronously (or not at all outside
+    # market hours), and Alpaca rejects a close order against a position
+    # that was never actually filled -- check_exits() must skip a position
+    # until this is True. Always True for internal_simulator (fills are
+    # synthetic/instant there, so the field is meaningless for that path).
+    broker_fill_confirmed: bool = True
