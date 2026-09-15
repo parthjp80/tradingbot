@@ -16,7 +16,7 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 
 from bot.config import ACCOUNT
-from bot.models import TradeSignal, Position, Regime
+from bot.models import TradeSignal, Position, Regime, StrategyType
 from bot.sectors import get_sector
 from bot.logger_setup import get_logger
 
@@ -139,9 +139,21 @@ class RiskManager:
     # ---- diversification / concentration -------------------------------------
 
     def _sector_counts(self) -> Counter:
-        return Counter(get_sector(p.symbol) for p in self.open_positions)
+        # 0DTE positions are excluded entirely -- they neither count toward
+        # nor are blocked by the sector cap (see _within_sector_cap). SPY/
+        # QQQ/IWM all map to the same "Broad Market ETF" sector, and with
+        # the default cap of 2, two ordinary condors/verticals on any two of
+        # them would otherwise starve 0DTE of the third. Portfolio-level
+        # delta/theta/vega caps are the real backstop against correlated
+        # concentration across these three, not this per-sector count.
+        return Counter(
+            get_sector(p.symbol) for p in self.open_positions
+            if p.strategy != StrategyType.ZERO_DTE_IRON_CONDOR
+        )
 
     def _within_sector_cap(self, signal: TradeSignal) -> bool:
+        if signal.strategy == StrategyType.ZERO_DTE_IRON_CONDOR:
+            return True
         sector = get_sector(signal.symbol)
         if sector == "UNKNOWN":
             return True  # unmapped names (e.g. custom universe) aren't gated
@@ -235,6 +247,11 @@ class RiskManager:
             probability) are elevated -- independent of and in addition to
             CRISIS, which only reacts to realized VIX moves. See
             bot/prediction_markets.py.
+          - 0DTE: cut further regardless of the above, same-day gamma risk
+            on top of whatever the strategy's own tighter strikes priced in.
+          - A+ setup (scanner_score >= aplus_score_threshold): boost size,
+            hard-capped at aplus_max_risk_per_trade_pct of equity regardless
+            of the multiplier -- applied last, after every cut above.
         """
         if ACCOUNT.position_sizing_method == "half_kelly":
             risk_budget = self._risk_budget_half_kelly(signal)
@@ -250,6 +267,13 @@ class RiskManager:
         if macro_risk_off:
             from bot.config import PREDICTION_MARKETS
             risk_budget *= (1 - PREDICTION_MARKETS.risk_off_size_cut_pct)
+
+        if signal.strategy == StrategyType.ZERO_DTE_IRON_CONDOR:
+            risk_budget *= (1 - ACCOUNT.zero_dte_size_cut_pct)
+
+        if signal.scanner_score >= ACCOUNT.aplus_score_threshold:
+            risk_budget *= (1 + ACCOUNT.aplus_size_boost_pct)
+            risk_budget = min(risk_budget, self.equity * ACCOUNT.aplus_max_risk_per_trade_pct)
 
         per_contract_risk = max(signal.est_max_loss, 1e-6)
         contracts = int(risk_budget // per_contract_risk)

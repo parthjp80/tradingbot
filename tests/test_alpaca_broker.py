@@ -123,6 +123,36 @@ def test_find_contract_handles_none_and_empty_open_interest(broker):
     assert result.symbol == "AAPL_C_110_NONE_OI"
 
 
+def test_find_contract_uses_same_day_window_for_0dte(broker):
+    b, rm, trade_client, _ = broker
+    captured = {}
+
+    def fake_get_contracts(req):
+        captured["req"] = req
+        return SimpleNamespace(option_contracts=[])
+
+    trade_client.get_option_contracts = fake_get_contracts
+    b.find_contract("SPY", is_call=True, target_strike=500.0, days_to_expiration=0)
+
+    req = captured["req"]
+    assert req.expiration_date_gte == req.expiration_date_lte  # exact same-day window, no slack
+
+
+def test_find_contract_uses_configured_window_for_non_0dte(broker):
+    b, rm, trade_client, _ = broker
+    captured = {}
+
+    def fake_get_contracts(req):
+        captured["req"] = req
+        return SimpleNamespace(option_contracts=[])
+
+    trade_client.get_option_contracts = fake_get_contracts
+    b.find_contract("AAPL", is_call=True, target_strike=100.0, days_to_expiration=45)
+
+    req = captured["req"]
+    assert (req.expiration_date_lte - req.expiration_date_gte).days == 2 * ALPACA.expiration_match_window_days
+
+
 def test_find_contract_uses_real_request_class(broker):
     b, rm, trade_client, _ = broker
     captured = {}
@@ -401,3 +431,78 @@ def test_check_exits_closes_on_profit_target(broker):
 
     b.check_exits({"AAPL": 100.0})
     assert pos.status == "closed"
+
+
+# ---- 0DTE force-close-by-time ------------------------------------------
+
+def make_0dte_open_position(force_close_by):
+    return Position(
+        id="order555", symbol="SPY", strategy=StrategyType.ZERO_DTE_IRON_CONDOR,
+        opened_at=datetime.utcnow(),
+        entry_credit_or_debit=300.0, max_loss=1200.0, contracts=1,
+        # profit_captured_pct realistically maxes out just under 1.0 for a
+        # credit position with non-negative cost_to_close, so 2.0 (200%) is
+        # unreachable by any real quote combination -- unlike 0.99, which a
+        # sufficiently favorable set of quotes CAN cross (learned the hard
+        # way: this used to be 0.99 and a test quote set legitimately closed
+        # it via the profit-target path instead of the force-close path).
+        stop_loss_level=1000.0, profit_target_pct=2.0,  # neither fires on its own
+        broker_name="alpaca_paper", broker_order_id="order555",
+        broker_leg_symbols=[
+            {"symbol": "SPY_C_500", "side": "sell"},
+            {"symbol": "SPY_C_505", "side": "buy"},
+            {"symbol": "SPY_P_490", "side": "sell"},
+            {"symbol": "SPY_P_485", "side": "buy"},
+        ],
+        force_close_by=force_close_by,
+    )
+
+
+def test_force_close_by_time_closes_regardless_of_pnl(broker):
+    b, rm, trade_client, data_client = broker
+    rm.open_positions.append(make_0dte_open_position(datetime.utcnow() - timedelta(minutes=1)))
+    pos = rm.open_positions[0]
+
+    close_calls = []
+    trade_client.submit_order = lambda req: close_calls.append(req) or SimpleNamespace(id="close1", filled_avg_price=None)
+    trade_client.get_order_by_id = lambda oid: SimpleNamespace(filled_avg_price=None)
+
+    b.check_exits({"SPY": 500.0})
+
+    assert pos.status == "closed"
+    assert len(close_calls) == 1  # closed via a real close order, not just marked closed locally
+
+
+def test_force_close_by_survives_save_and_reload(broker, monkeypatch, tmp_path):
+    # Regression test: _save_state()/_load_state() must serialize/deserialize
+    # force_close_by the same way they already handle opened_at/closed_at.
+    b, rm, trade_client, _ = broker
+    force_close_by = datetime.utcnow() + timedelta(hours=1)
+    rm.open_positions.append(make_0dte_open_position(force_close_by))
+
+    b._save_state()  # must not raise
+
+    import bot.alpaca_broker as ab_module
+    rm2 = type(rm)(equity=100_000)
+    b2 = ab_module.AlpacaBroker(rm2)  # constructor calls _load_state() automatically
+
+    reloaded = rm2.open_positions[0]
+    assert reloaded.force_close_by == force_close_by
+
+
+def test_force_close_by_time_does_not_fire_early(broker):
+    b, rm, trade_client, data_client = broker
+    rm.open_positions.append(make_0dte_open_position(datetime.utcnow() + timedelta(hours=2)))
+    pos = rm.open_positions[0]
+
+    quotes = {
+        "SPY_C_500": make_fake_quote(bid=1.0, ask=1.1),
+        "SPY_C_505": make_fake_quote(bid=0.4, ask=0.5),
+        "SPY_P_490": make_fake_quote(bid=0.8, ask=0.9),
+        "SPY_P_485": make_fake_quote(bid=0.3, ask=0.4),
+    }
+    data_client.get_option_latest_quote = lambda req: quotes
+
+    b.check_exits({"SPY": 500.0})
+
+    assert pos.status == "open"

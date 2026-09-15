@@ -27,6 +27,13 @@ def get_exit_rules(regime: Regime, strategy: StrategyType) -> tuple[float, float
     if strategy in (StrategyType.SHORT_PUT_VERTICAL, StrategyType.SHORT_CALL_VERTICAL):
         return (1.75, 0.60)  # trending trades: take profit sooner, trend can reverse
 
+    if strategy == StrategyType.ZERO_DTE_IRON_CONDOR:
+        # tighter than the 45-DTE condor on both sides: theta decay is much
+        # faster same-day, so there's less reason to let a loser run to 2x
+        # credit or hold out for the full 50% target. The force-close-by-time
+        # check in check_exits() is the real backstop regardless of these.
+        return (1.3, 0.40)
+
     if strategy == StrategyType.FUTURES_TREND:
         # ATR-based stop is already baked into est_max_loss; target is a
         # 2:1 reward:risk on the same ATR unit

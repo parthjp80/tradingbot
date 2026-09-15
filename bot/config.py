@@ -64,6 +64,24 @@ class AccountConfig:
     high_vol_atr_pct_threshold: float = 4.0   # ATR as % of price
     high_vol_size_cut_pct: float = 0.25       # cut risk budget by this much when ATR exceeds threshold
 
+    # -- 0DTE sizing --
+    # Same-day options carry sharply more gamma risk per dollar of premium
+    # than the 45-DTE condor, even with tighter strikes -- cut risk budget
+    # further on top of whatever the strategy's own strike selection already
+    # priced in. See bot/strategies/zero_dte.py, bot/market_hours.py.
+    zero_dte_size_cut_pct: float = 0.35
+
+    # -- A+ setup sizing boost --
+    # The scanner already computes a 0-100 quality score per candidate each
+    # cycle (bot/scanner.py) but it's discarded after ranking. When a signal's
+    # scanner_score clears aplus_score_threshold, size up -- but hard-capped
+    # at aplus_max_risk_per_trade_pct of equity regardless of the multiplier,
+    # the same way kelly_max_risk_per_trade_pct caps half-Kelly sizing
+    # regardless of what the math suggests.
+    aplus_score_threshold: float = 80.0
+    aplus_size_boost_pct: float = 0.25
+    aplus_max_risk_per_trade_pct: float = 0.03
+
     # -- revenge-trading / tilt prevention --
     consecutive_loss_cooldown_count: int = 3  # N losses in a row...
     consecutive_loss_cooldown_hours: int = 24  # ...triggers this many hours of no new entries
@@ -81,6 +99,7 @@ class AccountConfig:
         "short_put_vertical": 0.40,
         "short_call_vertical": 0.40,
         "futures_trend": 0.50,
+        "zero_dte_iron_condor": 0.20,
     })
 
     # -- trailing stop (profit protection / "monitor and adjust") --

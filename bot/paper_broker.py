@@ -42,6 +42,8 @@ class PaperBroker:
             for p in raw.get("open_positions", []):
                 p["opened_at"] = datetime.fromisoformat(p["opened_at"])
                 p["strategy"] = StrategyType(p["strategy"])
+                if p.get("force_close_by"):
+                    p["force_close_by"] = datetime.fromisoformat(p["force_close_by"])
                 pos = Position(**p)
                 self.risk_manager.open_positions.append(pos)
             self.risk_manager.equity = raw.get("equity", self.risk_manager.equity)
@@ -57,7 +59,8 @@ class PaperBroker:
             "open_positions": [
                 {**asdict(p), "opened_at": p.opened_at.isoformat(),
                  "strategy": p.strategy.value,
-                 "closed_at": p.closed_at.isoformat() if p.closed_at else None}
+                 "closed_at": p.closed_at.isoformat() if p.closed_at else None,
+                 "force_close_by": p.force_close_by.isoformat() if p.force_close_by else None}
                 for p in self.risk_manager.open_positions
             ],
         }
@@ -88,6 +91,7 @@ class PaperBroker:
         atr_pct_at_entry: float = 0.0,
         sizing_method_at_entry: str = "",
         consecutive_losses_at_entry: int = 0,
+        force_close_by: Optional[datetime] = None,
         signal=None,  # unused here; accepted so PaperBroker/AlpacaBroker share one call signature
     ) -> Position:
         slippage = abs(credit_or_debit) * SLIPPAGE_PCT_OF_MID
@@ -119,6 +123,7 @@ class PaperBroker:
             planned_profit_target_pct=profit_target_pct,
             sizing_method_at_entry=sizing_method_at_entry,
             consecutive_losses_at_entry=consecutive_losses_at_entry,
+            force_close_by=force_close_by,
         )
         self.risk_manager.register_open(pos)
         self._save_state()
@@ -166,6 +171,18 @@ class PaperBroker:
         scratch instead of round-tripping into a full loss.
         """
         for pos in list(self.risk_manager.open_positions):
+            if pos.force_close_by is not None and datetime.utcnow() >= pos.force_close_by:
+                # 0DTE only: unconditional, regardless of P&L -- avoids
+                # end-of-day gamma risk. Must run before profit-target/
+                # stop-loss/trailing logic below, not instead of a losing
+                # check -- this fires even on a position that's currently a
+                # winner. See bot/market_hours.py.
+                days_open = max((datetime.utcnow() - pos.opened_at).days, 0)
+                theta_captured = abs(pos.theta_estimate) * days_open
+                estimated_value = max(pos.entry_credit_or_debit - theta_captured, -pos.max_loss / max(pos.contracts, 1))
+                self.close_position(pos, estimated_value, reason="0DTE force close")
+                continue
+
             spot = current_prices.get(pos.symbol)
             if spot is None:
                 continue

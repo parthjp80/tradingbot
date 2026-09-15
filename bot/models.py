@@ -36,6 +36,7 @@ class StrategyType(str, Enum):
     SHORT_PUT_VERTICAL = "short_put_vertical"
     SHORT_CALL_VERTICAL = "short_call_vertical"
     FUTURES_TREND = "futures_trend"
+    ZERO_DTE_IRON_CONDOR = "zero_dte_iron_condor"
     NO_TRADE = "no_trade"
 
 
@@ -66,6 +67,12 @@ class TradeSignal:
     option_legs: list = field(default_factory=list)  # list[OptionLegSpec], empty for futures signals
     days_to_expiration: int = 0
     timestamp: datetime = field(default_factory=datetime.utcnow)
+    # The scanner's own 0-100 ranking score for this candidate (bot/scanner.py),
+    # threaded through so risk_manager.size_position() can size up on
+    # exceptionally strong setups. 0.0 for signals that bypassed the scanner
+    # (e.g. static_futures) -- never triggers the size boost, which is correct,
+    # those never got the scanner's quality read in the first place.
+    scanner_score: float = 0.0
 
 
 @dataclass
@@ -122,3 +129,8 @@ class Position:
     # until this is True. Always True for internal_simulator (fills are
     # synthetic/instant there, so the field is meaningless for that path).
     broker_fill_confirmed: bool = True
+
+    # 0DTE only: naive-UTC wall-clock time by which this position must be
+    # force-closed regardless of P&L (see bot/market_hours.py). None for
+    # every other strategy -- no behavior change to them.
+    force_close_by: Optional[datetime] = None

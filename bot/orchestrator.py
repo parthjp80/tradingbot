@@ -9,7 +9,8 @@ from bot.universe import get_universe
 from bot.strategies.router import StrategyRouter
 from bot.risk_manager import RiskManager, CircuitBreakerTripped
 from bot.exit_rules import get_exit_rules
-from bot.models import RegimeSnapshot
+from bot.models import RegimeSnapshot, StrategyType
+from bot.market_hours import zero_dte_force_close_utc
 from bot.logger_setup import get_logger
 
 log = get_logger(__name__)
@@ -39,18 +40,22 @@ class Orchestrator:
             self.broker = PaperBroker(self.risk_manager)
             log.info("Broker backend: internal simulator.")
 
-    def _build_cycle_watchlist(self) -> list[tuple[WatchlistItem, RegimeSnapshot | None]]:
+    def _build_cycle_watchlist(self) -> list[tuple[WatchlistItem, RegimeSnapshot | None, float]]:
         """
-        Returns (WatchlistItem, RegimeSnapshot) pairs for this cycle.
-        Snapshot is pre-computed for scanner-sourced equity picks (the scan
-        already classified them, no point doing it twice); it's None for
-        static-watchlist mode, where the main loop classifies as it goes.
+        Returns (WatchlistItem, RegimeSnapshot, scanner_score) triples for
+        this cycle. Snapshot is pre-computed for scanner-sourced equity picks
+        (the scan already classified them, no point doing it twice); it's
+        None for static-watchlist mode, where the main loop classifies as it
+        goes. scanner_score is the scanner's own 0-100 ranking score, 0.0 for
+        anything that bypassed the scanner (static watchlist, static
+        futures) -- see TradeSignal.scanner_score / the A+ sizing boost in
+        risk_manager.size_position().
         """
         if not SCANNER.enabled:
             watchlist = DEFAULT_WATCHLIST
             if ALPACA.enabled:
                 watchlist = [item for item in watchlist if item.asset_class != "future"]
-            return [(item, None) for item in watchlist]
+            return [(item, None, 0.0) for item in watchlist]
 
         scan_results = self.scanner.scan(get_universe())
         tradeable = sorted([r for r in scan_results if r.passed], key=lambda r: r.score, reverse=True)
@@ -62,14 +67,14 @@ class Orchestrator:
             ", ".join(f"{r.symbol}({r.score:.0f},{r.snapshot.regime.value})" for r in top) or "none",
         )
 
-        pairs = [(WatchlistItem(r.symbol, "equity_option"), r.snapshot) for r in top]
+        triples = [(WatchlistItem(r.symbol, "equity_option"), r.snapshot, r.score) for r in top]
 
         if ALPACA.enabled:
             log.info("Alpaca broker active: skipping futures (%s) -- not supported by Alpaca.",
                       ", ".join(f.symbol for f in SCANNER.static_futures))
         else:
-            pairs += [(item, None) for item in SCANNER.static_futures]
-        return pairs
+            triples += [(item, None, 0.0) for item in SCANNER.static_futures]
+        return triples
 
     def run_cycle(self) -> None:
         log.info("=" * 70)
@@ -86,7 +91,7 @@ class Orchestrator:
         current_prices = {}
         rows = []
 
-        for item, precomputed_snapshot in self._build_cycle_watchlist():
+        for item, precomputed_snapshot, scanner_score in self._build_cycle_watchlist():
             try:
                 price_history = self.feed.history(item.symbol, period="1y", interval="1d")
                 current_prices[item.symbol] = float(price_history["Close"].iloc[-1])
@@ -106,6 +111,8 @@ class Orchestrator:
                 if signal is None:
                     rows.append([item.symbol, snapshot.regime.value, "-", "no signal", "-"])
                     continue
+
+                signal.scanner_score = scanner_score
 
                 if self.macro_engine is not None and signal.direction in ("long", "short"):
                     tilt = self.macro_engine.directional_tilt(signal.direction)
@@ -127,6 +134,12 @@ class Orchestrator:
                 if contracts is None:
                     rows.append([item.symbol, snapshot.regime.value, signal.strategy.value, "rejected", "-"])
                     continue
+
+                force_close_by = (
+                    zero_dte_force_close_utc()
+                    if signal.strategy == StrategyType.ZERO_DTE_IRON_CONDOR
+                    else None
+                )
 
                 # est_credit_or_risk and est_max_loss from the strategy layer are
                 # already expressed per contract (in dollars); max_loss stored on
@@ -153,6 +166,7 @@ class Orchestrator:
                     atr_pct_at_entry=signal.atr_pct,
                     sizing_method_at_entry=ACCOUNT.position_sizing_method,
                     consecutive_losses_at_entry=self.risk_manager.consecutive_losses,
+                    force_close_by=force_close_by,
                     signal=signal,
                 )
 

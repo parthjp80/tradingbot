@@ -90,6 +90,8 @@ class AlpacaBroker:
             for p in raw.get("open_positions", []):
                 p["opened_at"] = datetime.fromisoformat(p["opened_at"])
                 p["strategy"] = StrategyType(p["strategy"])
+                if p.get("force_close_by"):
+                    p["force_close_by"] = datetime.fromisoformat(p["force_close_by"])
                 self.risk_manager.open_positions.append(Position(**p))
             self.risk_manager.equity = raw.get("equity", self.risk_manager.equity)
             self.risk_manager.peak_equity = raw.get("peak_equity", self.risk_manager.peak_equity)
@@ -105,7 +107,8 @@ class AlpacaBroker:
             "open_positions": [
                 {**asdict(p), "opened_at": p.opened_at.isoformat(),
                  "strategy": p.strategy.value,
-                 "closed_at": p.closed_at.isoformat() if p.closed_at else None}
+                 "closed_at": p.closed_at.isoformat() if p.closed_at else None,
+                 "force_close_by": p.force_close_by.isoformat() if p.force_close_by else None}
                 for p in self.risk_manager.open_positions
             ],
         }
@@ -128,7 +131,10 @@ class AlpacaBroker:
 
         target_date = date.today() + timedelta(days=days_to_expiration)
         window = ALPACA.strike_match_window_pct
-        dte_window = ALPACA.expiration_match_window_days
+        # 0DTE needs an exact same-day match -- the default +/-5 day window
+        # would happily match a same-day target to a contract expiring days
+        # later, which defeats the entire point of a 0DTE strategy.
+        dte_window = 0 if days_to_expiration == 0 else ALPACA.expiration_match_window_days
 
         req = GetOptionContractsRequest(
             underlying_symbols=[symbol],
@@ -190,6 +196,7 @@ class AlpacaBroker:
         atr_pct_at_entry: float = 0.0,
         sizing_method_at_entry: str = "",
         consecutive_losses_at_entry: int = 0,
+        force_close_by: Optional[datetime] = None,
         signal: Optional[TradeSignal] = None,
     ) -> Optional[Position]:
         if strategy == StrategyType.FUTURES_TREND:
@@ -335,6 +342,7 @@ class AlpacaBroker:
             broker_name="alpaca_paper",
             broker_order_id=str(order.id),
             broker_leg_symbols=[{"symbol": c.symbol, "side": side} for c, side in resolved],
+            force_close_by=force_close_by,
         )
         self.risk_manager.register_open(pos)
         self._save_state()
@@ -426,6 +434,19 @@ class AlpacaBroker:
                 if not pos.broker_fill_confirmed:
                     log.info("AlpacaBroker: %s (%s) still has no confirmed fill, skipping exit check this cycle.", pos.symbol, pos.broker_order_id)
                     continue
+
+            if pos.force_close_by is not None and datetime.utcnow() >= pos.force_close_by:
+                # 0DTE only: unconditional, regardless of P&L -- avoids
+                # end-of-day gamma risk. Must come after the fill-confirmation
+                # check above (closing an unfilled position is exactly the
+                # "position intent mismatch" bug fixed earlier -- there must
+                # be a real fill to close against), but before profit-target/
+                # stop-loss below -- this fires even on a position that's
+                # currently a winner. current_value is a neutral fallback;
+                # close_position() overrides it with the real fill price when
+                # available. See bot/market_hours.py.
+                self.close_position(pos, pos.entry_credit_or_debit, reason="0DTE force close")
+                continue
 
             leg_symbols = [leg["symbol"] for leg in pos.broker_leg_symbols]
             try:

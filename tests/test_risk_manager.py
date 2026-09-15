@@ -241,3 +241,123 @@ def test_win_resets_consecutive_loss_counter():
     rm.register_close(win_pos, 150)
     assert rm.consecutive_losses == 0
     assert rm.cooldown_until is None
+
+
+# ---- 0DTE ------------------------------------------------------------
+
+def test_zero_dte_min_reward_risk_ratio_key_present():
+    # Regression guard: RiskManager._within_reward_risk_minimum silently
+    # returns True (gate bypassed, not rejected) if a StrategyType's .value
+    # isn't a key in ACCOUNT.min_reward_risk_ratio -- this test exists
+    # specifically to catch that landmine if the key is ever removed.
+    assert StrategyType.ZERO_DTE_IRON_CONDOR.value in ACCOUNT.min_reward_risk_ratio
+
+
+def test_zero_dte_size_cut_applied():
+    rm = RiskManager(equity=100_000)
+    regular_signal = TradeSignal(
+        symbol="SPY", strategy=StrategyType.IRON_CONDOR, regime=Regime.HIGH_IV_RANGE,
+        direction="neutral", est_credit_or_risk=200, est_max_loss=500, confidence=1.0, rationale="",
+    )
+    zero_dte_signal = TradeSignal(
+        symbol="SPY", strategy=StrategyType.ZERO_DTE_IRON_CONDOR, regime=Regime.HIGH_IV_RANGE,
+        direction="neutral", est_credit_or_risk=200, est_max_loss=500, confidence=1.0, rationale="",
+    )
+    assert rm.size_position(zero_dte_signal) < rm.size_position(regular_signal)
+
+
+def test_zero_dte_sector_cap_exemption():
+    rm = RiskManager(equity=100_000)
+    original_cap = ACCOUNT.max_positions_per_sector
+    try:
+        ACCOUNT.max_positions_per_sector = 2
+        # SPY and QQQ both map to "Broad Market ETF" in bot/sectors.py --
+        # two non-0DTE positions on them already saturate the cap.
+        for sym in ["SPY", "QQQ"]:
+            rm.open_positions.append(Position(
+                id=sym, symbol=sym, strategy=StrategyType.IRON_CONDOR, opened_at=datetime.utcnow(),
+                entry_credit_or_debit=100, max_loss=500, contracts=1, stop_loss_level=2.0, profit_target_pct=0.5,
+            ))
+        # a *non*-0DTE signal on the third ETF should still be blocked
+        regular_signal = TradeSignal(
+            symbol="IWM", strategy=StrategyType.IRON_CONDOR, regime=Regime.HIGH_IV_RANGE,
+            direction="neutral", est_credit_or_risk=200, est_max_loss=500, confidence=1.0, rationale="",
+        )
+        assert rm._within_sector_cap(regular_signal) is False
+        # but a 0DTE signal on that same symbol is exempt from the cap entirely
+        zero_dte_signal = TradeSignal(
+            symbol="IWM", strategy=StrategyType.ZERO_DTE_IRON_CONDOR, regime=Regime.HIGH_IV_RANGE,
+            direction="neutral", est_credit_or_risk=200, est_max_loss=500, confidence=1.0, rationale="",
+        )
+        assert rm._within_sector_cap(zero_dte_signal) is True
+    finally:
+        ACCOUNT.max_positions_per_sector = original_cap
+
+
+def test_zero_dte_positions_dont_count_against_sector_cap():
+    rm = RiskManager(equity=100_000)
+    original_cap = ACCOUNT.max_positions_per_sector
+    try:
+        ACCOUNT.max_positions_per_sector = 2
+        # two OPEN 0DTE positions on SPY/QQQ should not count toward the
+        # cap that a regular (non-0DTE) IWM signal is checked against
+        for sym in ["SPY", "QQQ"]:
+            rm.open_positions.append(Position(
+                id=sym, symbol=sym, strategy=StrategyType.ZERO_DTE_IRON_CONDOR, opened_at=datetime.utcnow(),
+                entry_credit_or_debit=100, max_loss=500, contracts=1, stop_loss_level=2.0, profit_target_pct=0.5,
+            ))
+        regular_signal = TradeSignal(
+            symbol="IWM", strategy=StrategyType.IRON_CONDOR, regime=Regime.HIGH_IV_RANGE,
+            direction="neutral", est_credit_or_risk=200, est_max_loss=500, confidence=1.0, rationale="",
+        )
+        assert rm._within_sector_cap(regular_signal) is True
+    finally:
+        ACCOUNT.max_positions_per_sector = original_cap
+
+
+# ---- A+ setup sizing boost -------------------------------------------
+
+def test_aplus_score_boosts_size():
+    rm = RiskManager(equity=100_000)
+    low_score_signal = TradeSignal(
+        symbol="TEST", strategy=StrategyType.IRON_CONDOR, regime=Regime.HIGH_IV_RANGE,
+        direction="neutral", est_credit_or_risk=200, est_max_loss=100, confidence=1.0, rationale="",
+        scanner_score=50.0,
+    )
+    high_score_signal = TradeSignal(
+        symbol="TEST", strategy=StrategyType.IRON_CONDOR, regime=Regime.HIGH_IV_RANGE,
+        direction="neutral", est_credit_or_risk=200, est_max_loss=100, confidence=1.0, rationale="",
+        scanner_score=85.0,
+    )
+    assert rm.size_position(high_score_signal) > rm.size_position(low_score_signal)
+
+
+def test_aplus_boost_respects_hard_cap():
+    rm = RiskManager(equity=100_000)
+    original_boost = ACCOUNT.aplus_size_boost_pct
+    try:
+        ACCOUNT.aplus_size_boost_pct = 5.0  # absurdly large multiplier
+        signal = TradeSignal(
+            symbol="TEST", strategy=StrategyType.IRON_CONDOR, regime=Regime.HIGH_IV_RANGE,
+            direction="neutral", est_credit_or_risk=200, est_max_loss=1, confidence=1.0, rationale="",
+            scanner_score=95.0,
+        )
+        contracts = rm.size_position(signal)
+        assert contracts * 1 <= rm.equity * ACCOUNT.aplus_max_risk_per_trade_pct + 1  # +1 for the floor-division tolerance
+    finally:
+        ACCOUNT.aplus_size_boost_pct = original_boost
+
+
+def test_score_below_threshold_no_boost():
+    rm = RiskManager(equity=100_000)
+    signal = TradeSignal(
+        symbol="TEST", strategy=StrategyType.IRON_CONDOR, regime=Regime.HIGH_IV_RANGE,
+        direction="neutral", est_credit_or_risk=200, est_max_loss=500, confidence=1.0, rationale="",
+        scanner_score=79.9,
+    )
+    baseline_signal = TradeSignal(
+        symbol="TEST", strategy=StrategyType.IRON_CONDOR, regime=Regime.HIGH_IV_RANGE,
+        direction="neutral", est_credit_or_risk=200, est_max_loss=500, confidence=1.0, rationale="",
+        scanner_score=0.0,
+    )
+    assert rm.size_position(signal) == rm.size_position(baseline_signal)
