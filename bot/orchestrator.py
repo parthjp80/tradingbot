@@ -164,6 +164,7 @@ class Orchestrator:
                     adx_at_entry=snapshot.adx,
                     iv_rank_at_entry=snapshot.iv_rank,
                     atr_pct_at_entry=signal.atr_pct,
+                    scanner_score_at_entry=signal.scanner_score,
                     sizing_method_at_entry=ACCOUNT.position_sizing_method,
                     consecutive_losses_at_entry=self.risk_manager.consecutive_losses,
                     force_close_by=force_close_by,

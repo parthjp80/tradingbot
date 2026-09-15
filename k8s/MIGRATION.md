@@ -27,6 +27,16 @@ normal `git push` here is all that's needed to change what's running.
 - `nfs-csi` StorageClass already exists on the cluster (shared with
   `lowfloat_trader`'s PVCs) — `k8s/pvc.yaml` here just requests two more
   volumes from it, no new wiring needed.
+- `ghcr.io/parthjp80/tradingbot-optimizer` (built by
+  `.github/workflows/build-optimizer.yaml`) needs to be made **public**
+  too, same as the main image, after its first push.
+- Generate a **fine-grained GitHub PAT** scoped to only this repo, with
+  "Contents: Read and write" + "Pull requests: Read and write" permissions
+  (https://github.com/settings/tokens?type=beta) — this is what
+  `autotune.sh` uses to push the auto-tune branch and open its PR. Fill it
+  into `k8s/optimizer-secret.env` via `sops k8s/optimizer-secret.env`.
+  Fine-grained PATs expire on a fixed schedule (max 1 year) and need
+  periodic manual rotation — no auto-renewal, no reminder from GitHub.
 
 ## Config and secrets — auto-restart on change
 
@@ -61,6 +71,12 @@ git push   # to bot/**, main.py, requirements.txt, Dockerfile
 kubectl -n trading rollout restart deployment/tradingbot
 ```
 
+Changes under `bot/**` or `config/**` also trigger
+`.github/workflows/build-optimizer.yaml`, rebuilding
+`ghcr.io/parthjp80/tradingbot-optimizer:latest` — no restart needed there,
+it's picked up fresh on the CronJob's next scheduled (or manually
+triggered) run.
+
 ## Day-to-day operations
 
 ### View logs
@@ -89,6 +105,13 @@ kubectl -n trading exec -it deployment/tradingbot -- python3 main.py --once --fo
 ```bash
 kubectl -n trading get jobs -l component=scaler
 kubectl -n trading get cronjob tradingbot-scale-up tradingbot-scale-down
+```
+
+### Run the optimizer manually (instead of waiting for Monday 7am ET)
+```bash
+kubectl -n trading create job optimizer-manual --from=cronjob/tradingbot-optimizer
+kubectl -n trading logs -f job/optimizer-manual
+# if it found changes, review the PR it opened on GitHub like any other PR
 ```
 
 ### Check Flux status for this app

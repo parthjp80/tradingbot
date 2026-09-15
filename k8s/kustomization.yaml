@@ -14,6 +14,7 @@ resources:
   - deployment.yaml
   - scale-rbac.yaml
   - cronjob-scale.yaml
+  - cronjob-optimizer.yaml
 
 # Generates ConfigMap/Secret with a content-hash suffix (e.g.
 # tradingbot-config-7gk9b2). Kustomize rewrites every reference to the
@@ -29,6 +30,12 @@ secretGenerator:
   - name: tradingbot-secrets
     envs:
       - secret.env
+  # Separate secret object, mounted only into the optimizer CronJob -- see
+  # k8s/optimizer-secret.env's own comment for why this stays split from
+  # tradingbot-secrets above.
+  - name: tradingbot-optimizer-secrets
+    envs:
+      - optimizer-secret.env
 
 commonLabels:
   app.kubernetes.io/name: tradingbot

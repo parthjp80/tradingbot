@@ -107,6 +107,7 @@ class Position:
     adx_at_entry: float = 0.0
     iv_rank_at_entry: float = 0.0
     atr_pct_at_entry: float = 0.0
+    scanner_score_at_entry: float = 0.0
     planned_stop_loss_level: float = 0.0
     planned_profit_target_pct: float = 0.0
 

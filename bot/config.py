@@ -240,6 +240,12 @@ class PredictionMarketConfig:
 
 ACCOUNT = AccountConfig()
 REGIME = RegimeThresholds()
+
+# Optimizer-recommended parameter overrides, applied on top of the coded
+# defaults above -- see bot/tuned_overrides.py. Absent file = no-op.
+from bot.tuned_overrides import apply_overrides as _apply_tuned_overrides
+_apply_tuned_overrides({"ACCOUNT": ACCOUNT, "REGIME": REGIME})
+
 SCANNER = ScannerConfig(enabled=os.getenv("BOT_SCANNER_ENABLED", "true").lower() != "false")
 ALPACA = AlpacaConfig(enabled=os.getenv("BOT_BROKER_BACKEND", "internal_simulator").lower() == "alpaca_paper")
 PREDICTION_MARKETS = PredictionMarketConfig(enabled=os.getenv("BOT_PREDICTION_MARKETS_ENABLED", "false").lower() == "true")
