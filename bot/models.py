@@ -73,6 +73,14 @@ class TradeSignal:
     # (e.g. static_futures) -- never triggers the size boost, which is correct,
     # those never got the scanner's quality read in the first place.
     scanner_score: float = 0.0
+    # Result of bot/aplus_checklist.py's PREMIUM_CHECKLIST, evaluated in
+    # Orchestrator for premium-selling strategies only (see
+    # aplus_checklist.CHECKLIST_STRATEGIES). False/empty for every other
+    # signal -- never triggers the size boost, same reasoning as
+    # scanner_score above. A clean 13/13 is required; there's no automated
+    # stand-in for "one miss with a good reason".
+    aplus_checklist_passed: bool = False
+    aplus_checklist_missed: list = field(default_factory=list)
 
 
 @dataclass

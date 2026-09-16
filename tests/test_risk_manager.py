@@ -318,16 +318,19 @@ def test_zero_dte_positions_dont_count_against_sector_cap():
 # ---- A+ setup sizing boost -------------------------------------------
 
 def test_aplus_score_boosts_size():
+    # The boost now requires BOTH scanner_score >= threshold AND a clean
+    # checklist pass (see bot/aplus_checklist.py) -- aplus_checklist_passed=True
+    # here isolates the scanner_score half of the gate.
     rm = RiskManager(equity=100_000)
     low_score_signal = TradeSignal(
         symbol="TEST", strategy=StrategyType.IRON_CONDOR, regime=Regime.HIGH_IV_RANGE,
         direction="neutral", est_credit_or_risk=200, est_max_loss=100, confidence=1.0, rationale="",
-        scanner_score=50.0,
+        scanner_score=50.0, aplus_checklist_passed=True,
     )
     high_score_signal = TradeSignal(
         symbol="TEST", strategy=StrategyType.IRON_CONDOR, regime=Regime.HIGH_IV_RANGE,
         direction="neutral", est_credit_or_risk=200, est_max_loss=100, confidence=1.0, rationale="",
-        scanner_score=85.0,
+        scanner_score=85.0, aplus_checklist_passed=True,
     )
     assert rm.size_position(high_score_signal) > rm.size_position(low_score_signal)
 
@@ -340,7 +343,7 @@ def test_aplus_boost_respects_hard_cap():
         signal = TradeSignal(
             symbol="TEST", strategy=StrategyType.IRON_CONDOR, regime=Regime.HIGH_IV_RANGE,
             direction="neutral", est_credit_or_risk=200, est_max_loss=1, confidence=1.0, rationale="",
-            scanner_score=95.0,
+            scanner_score=95.0, aplus_checklist_passed=True,
         )
         contracts = rm.size_position(signal)
         assert contracts * 1 <= rm.equity * ACCOUNT.aplus_max_risk_per_trade_pct + 1  # +1 for the floor-division tolerance
@@ -353,11 +356,29 @@ def test_score_below_threshold_no_boost():
     signal = TradeSignal(
         symbol="TEST", strategy=StrategyType.IRON_CONDOR, regime=Regime.HIGH_IV_RANGE,
         direction="neutral", est_credit_or_risk=200, est_max_loss=500, confidence=1.0, rationale="",
-        scanner_score=79.9,
+        scanner_score=79.9, aplus_checklist_passed=True,
     )
     baseline_signal = TradeSignal(
         symbol="TEST", strategy=StrategyType.IRON_CONDOR, regime=Regime.HIGH_IV_RANGE,
         direction="neutral", est_credit_or_risk=200, est_max_loss=500, confidence=1.0, rationale="",
-        scanner_score=0.0,
+        scanner_score=0.0, aplus_checklist_passed=True,
     )
     assert rm.size_position(signal) == rm.size_position(baseline_signal)
+
+
+def test_high_score_without_checklist_pass_gets_no_boost():
+    # A hot scanner_score alone must not size up -- the checklist gate is
+    # mandatory, not a bonus on top of the score. Regression guard for the
+    # A+ checklist wiring (bot/aplus_checklist.py, Orchestrator, risk_manager).
+    rm = RiskManager(equity=100_000)
+    scored_but_not_checked = TradeSignal(
+        symbol="TEST", strategy=StrategyType.IRON_CONDOR, regime=Regime.HIGH_IV_RANGE,
+        direction="neutral", est_credit_or_risk=200, est_max_loss=100, confidence=1.0, rationale="",
+        scanner_score=95.0, aplus_checklist_passed=False,
+    )
+    baseline_signal = TradeSignal(
+        symbol="TEST", strategy=StrategyType.IRON_CONDOR, regime=Regime.HIGH_IV_RANGE,
+        direction="neutral", est_credit_or_risk=200, est_max_loss=100, confidence=1.0, rationale="",
+        scanner_score=0.0, aplus_checklist_passed=False,
+    )
+    assert rm.size_position(scored_but_not_checked) == rm.size_position(baseline_signal)

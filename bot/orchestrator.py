@@ -4,13 +4,14 @@ from tabulate import tabulate
 from bot.config import DEFAULT_WATCHLIST, SCANNER, WatchlistItem, ACCOUNT, ALPACA, PREDICTION_MARKETS
 from bot.data_feed import get_feed
 from bot.regime import RegimeClassifier
-from bot.scanner import MarketScanner
+from bot.scanner import MarketScanner, ScanResult
 from bot.universe import get_universe
 from bot.strategies.router import StrategyRouter
 from bot.risk_manager import RiskManager, CircuitBreakerTripped
 from bot.exit_rules import get_exit_rules
 from bot.models import RegimeSnapshot, StrategyType
 from bot.market_hours import zero_dte_force_close_utc
+from bot.aplus_checklist import CHECKLIST_STRATEGIES, evaluate_premium_checklist
 from bot.logger_setup import get_logger
 
 log = get_logger(__name__)
@@ -40,22 +41,26 @@ class Orchestrator:
             self.broker = PaperBroker(self.risk_manager)
             log.info("Broker backend: internal simulator.")
 
-    def _build_cycle_watchlist(self) -> list[tuple[WatchlistItem, RegimeSnapshot | None, float]]:
+    def _build_cycle_watchlist(self) -> list[tuple[WatchlistItem, RegimeSnapshot | None, float, ScanResult | None]]:
         """
-        Returns (WatchlistItem, RegimeSnapshot, scanner_score) triples for
-        this cycle. Snapshot is pre-computed for scanner-sourced equity picks
-        (the scan already classified them, no point doing it twice); it's
-        None for static-watchlist mode, where the main loop classifies as it
-        goes. scanner_score is the scanner's own 0-100 ranking score, 0.0 for
-        anything that bypassed the scanner (static watchlist, static
-        futures) -- see TradeSignal.scanner_score / the A+ sizing boost in
-        risk_manager.size_position().
+        Returns (WatchlistItem, RegimeSnapshot, scanner_score, ScanResult)
+        quadruples for this cycle. Snapshot is pre-computed for
+        scanner-sourced equity picks (the scan already classified them, no
+        point doing it twice); it's None for static-watchlist mode, where
+        the main loop classifies as it goes. scanner_score is the scanner's
+        own 0-100 ranking score, 0.0 for anything that bypassed the scanner
+        (static watchlist, static futures) -- see TradeSignal.scanner_score /
+        the A+ sizing boost in risk_manager.size_position(). The ScanResult
+        itself is threaded through (None off the scanner path) so run_cycle
+        can grade the eventual signal against bot/aplus_checklist.py --
+        _build_cycle_watchlist has it already; recomputing it later would
+        mean a second scan.
         """
         if not SCANNER.enabled:
             watchlist = DEFAULT_WATCHLIST
             if ALPACA.enabled:
                 watchlist = [item for item in watchlist if item.asset_class != "future"]
-            return [(item, None, 0.0) for item in watchlist]
+            return [(item, None, 0.0, None) for item in watchlist]
 
         scan_results = self.scanner.scan(get_universe())
         tradeable = sorted([r for r in scan_results if r.passed], key=lambda r: r.score, reverse=True)
@@ -67,14 +72,14 @@ class Orchestrator:
             ", ".join(f"{r.symbol}({r.score:.0f},{r.snapshot.regime.value})" for r in top) or "none",
         )
 
-        triples = [(WatchlistItem(r.symbol, "equity_option"), r.snapshot, r.score) for r in top]
+        quadruples = [(WatchlistItem(r.symbol, "equity_option"), r.snapshot, r.score, r) for r in top]
 
         if ALPACA.enabled:
             log.info("Alpaca broker active: skipping futures (%s) -- not supported by Alpaca.",
                       ", ".join(f.symbol for f in SCANNER.static_futures))
         else:
-            triples += [(item, None, 0.0) for item in SCANNER.static_futures]
-        return triples
+            quadruples += [(item, None, 0.0, None) for item in SCANNER.static_futures]
+        return quadruples
 
     def run_cycle(self) -> None:
         log.info("=" * 70)
@@ -91,7 +96,7 @@ class Orchestrator:
         current_prices = {}
         rows = []
 
-        for item, precomputed_snapshot, scanner_score in self._build_cycle_watchlist():
+        for item, precomputed_snapshot, scanner_score, scan_result in self._build_cycle_watchlist():
             try:
                 price_history = self.feed.history(item.symbol, period="1y", interval="1d")
                 current_prices[item.symbol] = float(price_history["Close"].iloc[-1])
@@ -113,6 +118,22 @@ class Orchestrator:
                     continue
 
                 signal.scanner_score = scanner_score
+
+                if scan_result is not None and signal.strategy in CHECKLIST_STRATEGIES:
+                    checklist = evaluate_premium_checklist(scan_result, signal)
+                    signal.aplus_checklist_passed = checklist.passed
+                    signal.aplus_checklist_missed = checklist.missed
+                    if checklist.passed:
+                        log.info(
+                            "[A+] %s clears the premium-selling checklist %d/%d -- eligible for aggressive sizing.",
+                            item.symbol, checklist.total, checklist.total,
+                        )
+                    elif scanner_score >= ACCOUNT.aplus_score_threshold:
+                        log.info(
+                            "[A+] %s scanner_score %.0f clears the threshold but checklist misses %d/%d: %s -- no size boost.",
+                            item.symbol, scanner_score, len(checklist.missed), checklist.total,
+                            ", ".join(checklist.missed_labels()),
+                        )
 
                 if self.macro_engine is not None and signal.direction in ("long", "short"):
                     tilt = self.macro_engine.directional_tilt(signal.direction)

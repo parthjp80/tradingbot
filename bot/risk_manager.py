@@ -249,9 +249,14 @@ class RiskManager:
             bot/prediction_markets.py.
           - 0DTE: cut further regardless of the above, same-day gamma risk
             on top of whatever the strategy's own tighter strikes priced in.
-          - A+ setup (scanner_score >= aplus_score_threshold): boost size,
-            hard-capped at aplus_max_risk_per_trade_pct of equity regardless
-            of the multiplier -- applied last, after every cut above.
+          - A+ setup: boost size, hard-capped at aplus_max_risk_per_trade_pct
+            of equity regardless of the multiplier -- applied last, after
+            every cut above. Requires BOTH scanner_score >= aplus_score_threshold
+            AND a clean 13/13 on bot/aplus_checklist.py's PREMIUM_CHECKLIST
+            (aplus_checklist_passed) -- a hot scanner score alone no longer
+            sizes up if the checklist itself misses something the score
+            doesn't capture (event risk inside expiration, a coiled range,
+            thin liquidity, ...).
         """
         if ACCOUNT.position_sizing_method == "half_kelly":
             risk_budget = self._risk_budget_half_kelly(signal)
@@ -271,7 +276,7 @@ class RiskManager:
         if signal.strategy == StrategyType.ZERO_DTE_IRON_CONDOR:
             risk_budget *= (1 - ACCOUNT.zero_dte_size_cut_pct)
 
-        if signal.scanner_score >= ACCOUNT.aplus_score_threshold:
+        if signal.scanner_score >= ACCOUNT.aplus_score_threshold and signal.aplus_checklist_passed:
             risk_budget *= (1 + ACCOUNT.aplus_size_boost_pct)
             risk_budget = min(risk_budget, self.equity * ACCOUNT.aplus_max_risk_per_trade_pct)
 
