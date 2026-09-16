@@ -155,6 +155,21 @@ exempt rather than silently blocked.
     (default 4% of price) gets its risk budget cut by `high_vol_size_cut_pct`
     (25%) on top of whatever the strategy's own strike/stop selection
     already priced in.
+  - **A+ setup boost**: sizing up on a strong setup requires clearing
+    **two** independent gates — `scanner_score >= aplus_score_threshold`
+    (default 80/100, the scanner's own quality ranking) *and* a clean
+    13/13 on `bot/aplus_checklist.py`'s PREMIUM_CHECKLIST (the Strangles/
+    Condors/Verticals half of a written A+ setup checklist: IV rank,
+    premium richness, liquidity, event risk inside expiration, structure,
+    confidence — evaluated in `Orchestrator` right after signal
+    generation, `TradeSignal.aplus_checklist_passed`). A hot scanner
+    score alone no longer sizes up; both must agree. When they do, the
+    risk budget is boosted by `aplus_size_boost_pct` (25%), hard-capped
+    at `aplus_max_risk_per_trade_pct` (3%) of equity regardless of the
+    multiplier. There's no automated stand-in for "one miss, with a good
+    reason" — it's 13/13 or no boost. The momentum/low-float half of the
+    same checklist doesn't apply here — it's wired into `lowfloat_trader`
+    instead, which never touches options.
 
 **5. Monitor and adjust.** New: a trailing-stop ratchet in
 `paper_broker.check_exits()`. Once a position captures
@@ -244,6 +259,7 @@ tests/                         pytest suite (regime, risk/expectancy, scanner, i
 - Max drawdown breaker: 15% drawdown halts **all** trading until manually resumed (`trading_paused_for_drawdown = False`)
 - Portfolio-level net delta / theta / vega caps, so multiple positions can't silently stack correlated risk
 - Duplicate-position guard: won't open a second position in a symbol that already has one open
+- A+ setup size boost gated on `scanner_score` **and** a clean 13/13 on the written A+ checklist (`bot/aplus_checklist.py`) — see "Position sizing formulas" above
 
 ## Broker backends
 
@@ -424,6 +440,11 @@ restarts) and `logs/` outside the container, matching how you've set up
   current position value via theta decay elapsed, not a real re-price of
   the option chain.
 - **Market hours check**: doesn't account for holidays or early closes.
+- **A+ checklist liquidity proxy**: `bot/aplus_checklist.py`'s "tight
+  spreads" and "enough OI to roll" items both read the same underlying
+  signal (20-day avg $ volume, at two strictness bars) — this data feed
+  (yfinance) carries no live options chain, so real bid/ask spread and
+  open-interest numbers don't exist to check directly.
 
 None of these affect the regime classification or risk-management logic —
 they only affect how realistic the *simulated* fills are. All of them are
