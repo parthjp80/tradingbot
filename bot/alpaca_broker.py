@@ -428,11 +428,30 @@ class AlpacaBroker:
                 # Re-check in case it filled since the opening cycle --
                 # otherwise skip entirely rather than risk a close attempt
                 # against a position Alpaca doesn't consider open yet.
+                terminal_unfilled = False
                 try:
                     fetched = self.trade_client.get_order_by_id(pos.broker_order_id)
                     pos.broker_fill_confirmed = getattr(fetched, "filled_avg_price", None) is not None
+                    # A day-limit order that expired/was canceled/rejected will
+                    # never get a filled_avg_price -- without this check the
+                    # position sits here forever "pending", permanently
+                    # occupying a concurrent-position slot for a trade that
+                    # never actually happened (see 2026-09-15 NVDA/BAC/... stuck
+                    # for 6 days until max_concurrent_positions blocked all new
+                    # entries).
+                    order_status = str(getattr(fetched, "status", "")).lower()
+                    if not pos.broker_fill_confirmed and order_status in ("expired", "canceled", "rejected"):
+                        terminal_unfilled = True
                 except Exception as e:
                     log.warning("AlpacaBroker: could not re-check fill status for %s (%s): %s", pos.symbol, pos.broker_order_id, e)
+                if terminal_unfilled:
+                    log.warning(
+                        "AlpacaBroker: %s (%s) entry order %s without ever filling -- discarding, never opened.",
+                        pos.symbol, pos.broker_order_id, order_status,
+                    )
+                    self.risk_manager.discard_unfilled(pos)
+                    self._save_state()
+                    continue
                 if not pos.broker_fill_confirmed:
                     log.info("AlpacaBroker: %s (%s) still has no confirmed fill, skipping exit check this cycle.", pos.symbol, pos.broker_order_id)
                     continue

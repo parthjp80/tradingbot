@@ -335,6 +335,16 @@ class RiskManager:
         self.open_positions.append(position)
         self.daily.trades_today += 1
 
+    def discard_unfilled(self, position: Position) -> None:
+        """
+        Drops a position whose entry order Alpaca has terminally rejected,
+        expired, or canceled without ever filling -- no equity/P&L/win-rate
+        impact since no real trade happened, just freeing the concurrent-
+        position slot it was wrongly holding.
+        """
+        if position in self.open_positions:
+            self.open_positions.remove(position)
+
     def register_close(self, position: Position, realized_pnl: float) -> None:
         if position in self.open_positions:
             self.open_positions.remove(position)
