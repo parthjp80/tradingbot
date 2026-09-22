@@ -8,6 +8,7 @@ on:
       - 'main.py'
       - 'requirements.txt'
       - 'Dockerfile'
+      - 'config/**'
   workflow_dispatch: {}
 
 env:
