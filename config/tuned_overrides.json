@@ -1,1 +1,38 @@
-{}
+{
+  "REGIME": {
+    "iv_rank_high": 50.0,
+    "iv_rank_low": 30.0,
+    "adx_trend": 25.0,
+    "adx_chop": 20.0
+  },
+  "ACCOUNT": {
+    "high_vol_size_cut_pct": 0.25,
+    "high_vol_atr_pct_threshold": 4.0,
+    "trailing_stop_activation_pct": 0.5,
+    "zero_dte_size_cut_pct": 0.35,
+    "aplus_score_threshold": 80.0,
+    "aplus_size_boost_pct": 0.25,
+    "min_reward_risk_ratio": {
+      "short_strangle": 0.25,
+      "iron_condor": 0.2,
+      "short_put_vertical": 0.4,
+      "short_call_vertical": 0.36,
+      "futures_trend": 0.5,
+      "zero_dte_iron_condor": 0.2
+    }
+  },
+  "_meta": {
+    "generated_at": "2026-09-28T11:00:22.599785",
+    "lookback_weeks": 4,
+    "trade_count": 67,
+    "changes": [
+      {
+        "path": "ACCOUNT.min_reward_risk_ratio.short_call_vertical",
+        "old": 0.4,
+        "new": 0.36,
+        "reason": "win_rate=100%, avg_pnl=1 over 66 trades -- room to admit more setups",
+        "sample_size": 66
+      }
+    ]
+  }
+}
