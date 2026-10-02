@@ -77,7 +77,10 @@ spec:
                   log = '/app/logs/tradingbot.log'
                   if not os.path.exists(log): exit(0)
                   age = time.time() - os.path.getmtime(log)
-                  exit(0 if age < 300 else 1)  # unhealthy if no log write in 5 min
+                  # must exceed POLL_INTERVAL_MINUTES (30): the bot only logs once
+                  # per cycle, so a 5-min window killed it ~every 12 min and each
+                  # restart ran an extra out-of-schedule cycle
+                  exit(0 if age < 2700 else 1)  # unhealthy if no log write in 45 min
             initialDelaySeconds: 60
             periodSeconds: 120
             failureThreshold: 3

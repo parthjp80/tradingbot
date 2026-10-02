@@ -381,7 +381,7 @@ def test_close_position_uses_confirmed_fill_price_when_available(broker):
     pos = rm.open_positions[0]
 
     trade_client.submit_order = lambda req: SimpleNamespace(id="close1", filled_avg_price=None)
-    trade_client.get_order_by_id = lambda oid: SimpleNamespace(filled_avg_price=120.0)
+    trade_client.get_order_by_id = lambda oid: SimpleNamespace(filled_avg_price=1.20)  # per-share, as Alpaca reports it
 
     realized = b.close_position(pos, current_value=999.0, reason="stop loss 2.0x credit hit")
     expected_pnl_per_contract = 300.0 - 120.0
@@ -409,7 +409,7 @@ def test_check_exits_computes_cost_to_close_from_real_quotes(broker):
     data_client.get_option_latest_quote = lambda req: quotes
 
     b.check_exits({"AAPL": 100.0})
-    assert pos.high_water_mark_pct == pytest.approx(1 - (1.3 / 300.0), abs=0.001)
+    assert pos.high_water_mark_pct == pytest.approx(1 - (130.0 / 300.0), abs=0.001)
 
 
 def test_check_exits_closes_on_profit_target(broker):
@@ -506,3 +506,67 @@ def test_force_close_by_time_does_not_fire_early(broker):
     b.check_exits({"SPY": 500.0})
 
     assert pos.status == "open"
+
+
+# ---- unfilled-entry discard / unit-consistent exits ----------------------
+
+def test_check_exits_discards_entry_order_alpaca_marked_expired(broker):
+    # Regression: alpaca-py returns status as an OrderStatus enum, whose
+    # str() is "OrderStatus.EXPIRED" on Python 3.11+ -- the check must match
+    # on its value, or expired entries sit as phantom open positions forever.
+    from alpaca.trading.enums import OrderStatus
+    b, rm, trade_client, _ = broker
+    rm.open_positions.append(make_open_position())
+    pos = rm.open_positions[0]
+    pos.broker_fill_confirmed = False
+    trade_client.get_order_by_id = lambda oid: SimpleNamespace(filled_avg_price=None, status=OrderStatus.EXPIRED)
+
+    b.check_exits({"AAPL": 100.0})
+
+    assert rm.open_positions == []
+
+
+def test_check_exits_does_not_close_fresh_fill_near_entry_value(broker):
+    # Regression: per-share quotes vs per-contract (x100) entry made a fresh
+    # fill read as ~99% profit captured and close on the cycle it filled.
+    b, rm, trade_client, data_client = broker
+    rm.open_positions.append(make_open_position())
+    pos = rm.open_positions[0]
+    pos.entry_credit_or_debit = 120.0
+    pos.profit_target_pct = 0.6
+    pos.stop_loss_level = 1.75
+
+    quotes = {  # cost to close: (1.0 + 0.9) - (0.5 + 0.2) = 1.20/share = $120
+        "AAPL_C_110": make_fake_quote(bid=0.9, ask=1.0),
+        "AAPL_C_115": make_fake_quote(bid=0.5, ask=0.6),
+        "AAPL_P_90": make_fake_quote(bid=0.8, ask=0.9),
+        "AAPL_P_85": make_fake_quote(bid=0.2, ask=0.3),
+    }
+    data_client.get_option_latest_quote = lambda req: quotes
+
+    b.check_exits({"AAPL": 100.0})
+
+    assert pos.status == "open"
+
+
+def test_check_exits_closes_on_stop_loss_for_credit_position(broker):
+    b, rm, trade_client, data_client = broker
+    rm.open_positions.append(make_open_position())
+    pos = rm.open_positions[0]
+    pos.entry_credit_or_debit = 100.0
+    pos.profit_target_pct = 0.6
+    pos.stop_loss_level = 1.75
+
+    quotes = {  # cost to close: (2.5 + 1.0) - (0.4 + 0.2) = 2.90/share = $290 -> loss 1.9x credit
+        "AAPL_C_110": make_fake_quote(bid=2.4, ask=2.5),
+        "AAPL_C_115": make_fake_quote(bid=0.4, ask=0.5),
+        "AAPL_P_90": make_fake_quote(bid=0.9, ask=1.0),
+        "AAPL_P_85": make_fake_quote(bid=0.2, ask=0.3),
+    }
+    data_client.get_option_latest_quote = lambda req: quotes
+    trade_client.submit_order = lambda req: SimpleNamespace(id="close1", filled_avg_price=None)
+    trade_client.get_order_by_id = lambda oid: SimpleNamespace(filled_avg_price=None)
+
+    b.check_exits({"AAPL": 100.0})
+
+    assert pos.status == "closed"

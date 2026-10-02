@@ -385,7 +385,9 @@ class AlpacaBroker:
         try:
             fetched = self.trade_client.get_order_by_id(order.id)
             if getattr(fetched, "filled_avg_price", None):
-                fill_value = float(fetched.filled_avg_price)
+                # filled_avg_price is per-share; entry_credit_or_debit is
+                # per-contract dollars (x100) -- convert before comparing
+                fill_value = float(fetched.filled_avg_price) * 100
         except Exception:
             log.warning(
                 "AlpacaBroker: could not confirm fill for close of %s (%s) -- recorded P&L is provisional, "
@@ -439,7 +441,12 @@ class AlpacaBroker:
                     # never actually happened (see 2026-09-15 NVDA/BAC/... stuck
                     # for 6 days until max_concurrent_positions blocked all new
                     # entries).
-                    order_status = str(getattr(fetched, "status", "")).lower()
+                    # status is an alpaca-py OrderStatus (str, Enum): str() on it
+                    # gives "OrderStatus.EXPIRED" on Python 3.11+, not "expired",
+                    # so compare on .value -- the str() form silently never
+                    # matched and left expired orders stuck as phantom positions.
+                    status = getattr(fetched, "status", "")
+                    order_status = str(getattr(status, "value", status)).lower()
                     if not pos.broker_fill_confirmed and order_status in ("expired", "canceled", "rejected"):
                         terminal_unfilled = True
                 except Exception as e:
@@ -495,9 +502,18 @@ class AlpacaBroker:
                 log.warning("AlpacaBroker: missing leg quote for %s, skipping this cycle's exit check.", pos.symbol)
                 continue
 
-            estimated_value = cost_to_close
-            profit_captured_pct = 1 - (estimated_value / pos.entry_credit_or_debit) if pos.entry_credit_or_debit else 0
-            loss_multiple = -estimated_value / pos.entry_credit_or_debit if pos.entry_credit_or_debit and estimated_value < 0 else 0
+            # quotes are per-share; entry_credit_or_debit is per-contract
+            # dollars (x100, see open_position). Comparing them unconverted
+            # made every fresh fill read as ~99% profit captured and close
+            # on the same cycle it filled (2026-09-23 IWM open/close churn).
+            estimated_value = round(cost_to_close * 100, 2)
+            entry = pos.entry_credit_or_debit
+            profit_captured_pct = 1 - (estimated_value / entry) if entry else 0
+            # loss as a multiple of the credit received: cost to close above
+            # the entry credit is money lost. (The old "-value/entry when
+            # value < 0" form could never fire on a credit spread, whose
+            # cost to close is always >= 0.)
+            loss_multiple = (estimated_value - entry) / entry if entry and estimated_value > entry else 0
 
             pos.high_water_mark_pct = max(pos.high_water_mark_pct, profit_captured_pct)
 
