@@ -156,3 +156,22 @@ def test_generate_charts_creates_files(tmp_path, monkeypatch):
 def test_generate_charts_none_when_empty(tmp_path, monkeypatch):
     monkeypatch.setattr(journal, "JOURNAL_FILE", tmp_path / "empty.csv")
     assert journal.generate_charts() is None
+
+
+def test_stale_header_over_current_shape_rows_is_rewritten(tmp_path, monkeypatch):
+    # Regression: a column added to FIELDNAMES after the file existed left the
+    # old header in place, shifting every DictReader value one column over.
+    monkeypatch.setattr(journal, "JOURNAL_FILE", tmp_path / "journal.csv")
+    journal.log_closed_trade(make_closed_position(pnl=150.0), exit_reason="profit target 50% hit")
+    import csv
+    with open(journal.JOURNAL_FILE, newline="") as f:
+        rows = list(csv.reader(f))
+    stale = [c for c in journal.FIELDNAMES if c != "scanner_score_at_entry"]
+    with open(journal.JOURNAL_FILE, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(stale)
+        w.writerows(rows[1:])
+
+    read = journal._read_rows()
+
+    assert float(read[0]["realized_pnl"]) == 150.0

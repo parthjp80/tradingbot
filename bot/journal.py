@@ -68,6 +68,29 @@ def _ensure_file() -> None:
         JOURNAL_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(JOURNAL_FILE, "w", newline="") as f:
             csv.DictWriter(f, fieldnames=FIELDNAMES).writeheader()
+        return
+    _migrate_stale_header()
+
+
+def _migrate_stale_header() -> None:
+    """Rows are always appended in current FIELDNAMES order, but the header
+    is only written when the file is created -- so adding a column (e.g.
+    scanner_score_at_entry) left an old header over new-shape rows, and
+    DictReader shifted every value one column over (realized_pnl read the
+    reward:risk ratio). Rewrite the header when every row already matches
+    the current shape; otherwise leave the file alone and say so."""
+    with open(JOURNAL_FILE, newline="") as f:
+        rows = list(csv.reader(f))
+    if not rows or rows[0] == FIELDNAMES:
+        return
+    if all(len(r) == len(FIELDNAMES) for r in rows[1:]):
+        with open(JOURNAL_FILE, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(FIELDNAMES)
+            w.writerows(rows[1:])
+        log.warning("Journal header was stale (%d cols) -- rewrote it to the current %d columns.", len(rows[0]), len(FIELDNAMES))
+    else:
+        log.error("Journal %s has a stale header and mixed row widths -- needs manual migration.", JOURNAL_FILE)
 
 
 def _lessons_learned(position: Position, exit_reason: str) -> str:
@@ -185,6 +208,7 @@ def _period_cutoff(period: str) -> Optional[datetime]:
 def _read_rows(period: str = "all") -> list:
     if not JOURNAL_FILE.exists():
         return []
+    _migrate_stale_header()
     with open(JOURNAL_FILE, newline="") as f:
         rows = list(csv.DictReader(f))
 
