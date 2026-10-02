@@ -31,8 +31,9 @@ WHAT THIS DOESN'T DO:
     for that level, order submission will fail with an error from Alpaca;
     check your account's option trading level in the Alpaca dashboard.
   - Anything beyond best-effort fill-price reconciliation. Multi-leg
-    orders can fill asynchronously; open_position() records the
-    theoretical credit at submission time, and close_position() attempts
+    orders can fill asynchronously; open_position() limit-prices at the
+    real-quote mid and records that, swapping in the actual fill price
+    once Alpaca confirms one, and close_position() attempts
     one immediate poll for the actual fill before falling back to the
     last marked value. For anything you're relying on for real decisions,
     cross-check against the Alpaca dashboard directly.
@@ -246,11 +247,60 @@ class AlpacaBroker:
             for contract, side in resolved
         ]
 
+        # Price the order off REAL quotes at the mid, not the theoretical
+        # Black-Scholes credit from pricing.py. The theoretical credit is
+        # routinely richer than the market will pay, so day-limit orders at
+        # that price just expired unfilled every day (every entry from
+        # 2026-09-24 on). Mid is the usual fillable-but-not-giving-away-edge
+        # price for a multi-leg spread.
+        #
+        # Same sign convention as credit_or_debit: selling a leg to open
+        # contributes what we receive, buying one contributes what we pay
+        # (negated). Per-share here; x100 for per-contract dollars.
+        market_mid = None
+        try:
+            from alpaca.data.requests import OptionLatestQuoteRequest
+            leg_symbols = [c.symbol for c, _ in resolved]
+            quotes = self.data_client.get_option_latest_quote(
+                OptionLatestQuoteRequest(symbol_or_symbols=leg_symbols)
+            )
+            mid = 0.0
+            for contract, leg_side in resolved:
+                q = quotes.get(contract.symbol)
+                if q is None:
+                    raise ValueError(f"no quote for {contract.symbol}")
+                bid, ask = float(q.bid_price), float(q.ask_price)
+                if bid <= 0 or ask <= 0 or ask < bid:
+                    raise ValueError(f"unusable quote for {contract.symbol} (bid={bid}, ask={ask})")
+                leg_mid = (bid + ask) / 2
+                mid += leg_mid if leg_side == "sell" else -leg_mid
+            market_mid = round(mid, 2)
+        except Exception as e:
+            log.warning(
+                "AlpacaBroker: could not price %s off real quotes, falling back to theoretical "
+                "credit/debit (%.2f): %s", symbol, credit_or_debit, e,
+            )
+
+        if market_mid is not None:
+            # The risk manager approved this trade (sizing, reward:risk) on the
+            # theoretical credit. If the market pays far less, the trade it
+            # approved isn't the one on offer -- skip rather than sell premium
+            # for pennies against the same max loss.
+            min_credit = ALPACA.min_market_to_theoretical_credit_ratio * credit_or_debit
+            if market_mid * 100 <= 0 or market_mid * 100 < min_credit:
+                log.info(
+                    "AlpacaBroker: skipping %s -- market mid credit %.2f is below %.0f%% of the "
+                    "theoretical %.2f the trade was approved on.",
+                    symbol, market_mid * 100, ALPACA.min_market_to_theoretical_credit_ratio * 100, credit_or_debit,
+                )
+                return None
+            entry_credit_or_debit = round(market_mid * 100, 2)  # per-contract dollars
+        else:
+            entry_credit_or_debit = credit_or_debit
+
         # Alpaca's mleg sign convention: positive limit_price = net debit paid,
-        # negative = net credit received. Our credit_or_debit is already a
-        # positive dollar credit per contract (already x100), so flip sign
-        # and convert back to a per-share limit.
-        limit_price = round(-(credit_or_debit / 100), 2) if credit_or_debit else 0.0
+        # negative = net credit received.
+        limit_price = round(-(entry_credit_or_debit / 100), 2) if entry_credit_or_debit else 0.0
 
         req = LimitOrderRequest(
             qty=contracts,
@@ -266,41 +316,6 @@ class AlpacaBroker:
             log.error("AlpacaBroker: order submission failed for %s: %s", symbol, e)
             return None
 
-        # Re-mark entry to a REAL quote-derived value before storing it.
-        # credit_or_debit is theoretical (Black-Scholes, pricing.py), but
-        # check_exits() marks positions to market using real Alpaca quotes.
-        # Keeping the theoretical value as entry_credit_or_debit means the
-        # very next check_exits() call compares a real mark against a
-        # theoretical basis -- any model/market gap reads as an immediate
-        # profit-target or stop-loss hit and triggers a close attempt on a
-        # position that was never even filled yet (Alpaca rejects it:
-        # "position intent mismatch, inferred: buy_to_open, specified:
-        # buy_to_close"). Pricing entry the same way exits are priced
-        # makes the two comparable from the first cycle on.
-        entry_credit_or_debit = credit_or_debit
-        try:
-            from alpaca.data.requests import OptionLatestQuoteRequest
-            leg_symbols = [c.symbol for c, _ in resolved]
-            quotes = self.data_client.get_option_latest_quote(
-                OptionLatestQuoteRequest(symbol_or_symbols=leg_symbols)
-            )
-            marked = 0.0
-            for contract, leg_side in resolved:
-                q = quotes.get(contract.symbol)
-                if q is None:
-                    raise ValueError(f"no quote for {contract.symbol}")
-                # same sign convention as credit_or_debit: selling a leg
-                # to open contributes what we'd receive (bid), buying a
-                # leg to open contributes what we'd pay (ask, negated).
-                marked += float(q.bid_price) if leg_side == "sell" else -float(q.ask_price)
-            entry_credit_or_debit = round(marked * 100, 2)  # per-contract dollars, matches credit_or_debit's *100 convention
-        except Exception as e:
-            log.warning(
-                "AlpacaBroker: could not mark %s entry to real quotes, falling back to theoretical "
-                "credit/debit (%.2f) -- exit checks this cycle may be less accurate: %s",
-                symbol, credit_or_debit, e,
-            )
-
         # Multi-leg orders can fill asynchronously (README), and options
         # orders don't fill at all outside market hours -- check_exits()
         # must not attempt to close a position until this is confirmed
@@ -311,6 +326,8 @@ class AlpacaBroker:
         try:
             fetched = self.trade_client.get_order_by_id(order.id)
             fill_confirmed = getattr(fetched, "filled_avg_price", None) is not None
+            if fill_confirmed:
+                entry_credit_or_debit = self._entry_value_from_fill(fetched.filled_avg_price)
         except Exception as e:
             log.warning("AlpacaBroker: could not confirm fill status for %s (%s), assuming pending: %s", symbol, order.id, e)
 
@@ -319,7 +336,7 @@ class AlpacaBroker:
             symbol=symbol,
             strategy=strategy,
             opened_at=datetime.utcnow(),
-            entry_credit_or_debit=entry_credit_or_debit,  # real-quote-marked when available; see note above
+            entry_credit_or_debit=entry_credit_or_debit,  # real fill > market mid > theoretical, see above
             broker_fill_confirmed=fill_confirmed,
             max_loss=max_loss,
             contracts=contracts,
@@ -353,6 +370,12 @@ class AlpacaBroker:
             symbol, contracts, strategy.value, [c.symbol for c, _ in resolved], order.id, limit_price,
         )
         return pos
+
+    @staticmethod
+    def _entry_value_from_fill(filled_avg_price) -> float:
+        """Alpaca reports a multi-leg fill per share, negative for a net
+        credit; entry_credit_or_debit is positive-credit per-contract dollars."""
+        return round(-float(filled_avg_price) * 100, 2)
 
     # ---- closing --------------------------------------------------------
 
@@ -434,6 +457,10 @@ class AlpacaBroker:
                 try:
                     fetched = self.trade_client.get_order_by_id(pos.broker_order_id)
                     pos.broker_fill_confirmed = getattr(fetched, "filled_avg_price", None) is not None
+                    if pos.broker_fill_confirmed:
+                        # exits are measured against what we actually got, not the limit
+                        pos.entry_credit_or_debit = self._entry_value_from_fill(fetched.filled_avg_price)
+                        self._save_state()
                     # A day-limit order that expired/was canceled/rejected will
                     # never get a filled_avg_price -- without this check the
                     # position sits here forever "pending", permanently

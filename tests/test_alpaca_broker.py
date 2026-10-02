@@ -570,3 +570,72 @@ def test_check_exits_closes_on_stop_loss_for_credit_position(broker):
     b.check_exits({"AAPL": 100.0})
 
     assert pos.status == "closed"
+
+
+# ---- mid-price entries ---------------------------------------------------
+
+def _resolve_condor_legs(trade_client):
+    def fake_get_contracts(req):
+        mid_strike = (float(req.strike_price_gte) + float(req.strike_price_lte)) / 2
+        kind = "C" if req.type.value == "call" else "P"
+        return SimpleNamespace(option_contracts=[make_fake_contract(f"AAPL_{kind}_{mid_strike:.0f}", mid_strike)])
+    trade_client.get_option_contracts = fake_get_contracts
+
+
+CONDOR_QUOTES = {  # mid credit: (1.05 + 0.85) - (0.45 + 0.35) = 1.10/share
+    "AAPL_C_110": make_fake_quote(bid=1.0, ask=1.1),
+    "AAPL_C_115": make_fake_quote(bid=0.4, ask=0.5),
+    "AAPL_P_90": make_fake_quote(bid=0.8, ask=0.9),
+    "AAPL_P_85": make_fake_quote(bid=0.3, ask=0.4),
+}
+
+
+def test_open_position_limit_prices_at_real_quote_mid(broker):
+    b, rm, trade_client, data_client = broker
+    _resolve_condor_legs(trade_client)
+    data_client.get_option_latest_quote = lambda req: CONDOR_QUOTES
+    captured = []
+    trade_client.submit_order = lambda req: captured.append(req) or SimpleNamespace(id="o1", filled_avg_price=None)
+    trade_client.get_order_by_id = lambda oid: SimpleNamespace(filled_avg_price=None)
+
+    pos = b.open_position(
+        symbol="AAPL", strategy=StrategyType.IRON_CONDOR, credit_or_debit=150.0, max_loss=1200.0,
+        contracts=1, stop_loss_multiple=2.0, profit_target_pct=0.5, signal=make_iron_condor_signal(),
+    )
+
+    assert captured[0].limit_price == pytest.approx(-1.10)
+    assert pos.entry_credit_or_debit == pytest.approx(110.0)
+
+
+def test_open_position_skips_when_market_credit_far_below_theoretical(broker):
+    b, rm, trade_client, data_client = broker
+    _resolve_condor_legs(trade_client)
+    data_client.get_option_latest_quote = lambda req: CONDOR_QUOTES
+    submitted = []
+    trade_client.submit_order = lambda req: submitted.append(req)
+
+    pos = b.open_position(
+        symbol="AAPL", strategy=StrategyType.IRON_CONDOR, credit_or_debit=300.0, max_loss=1200.0,  # market 110 < 50% of 300
+        contracts=1, stop_loss_multiple=2.0, profit_target_pct=0.5, signal=make_iron_condor_signal(),
+    )
+
+    assert pos is None
+    assert submitted == []
+
+
+def test_entry_value_switches_to_real_fill_once_confirmed(broker):
+    b, rm, trade_client, data_client = broker
+    rm.open_positions.append(make_open_position())
+    pos = rm.open_positions[0]
+    pos.broker_fill_confirmed = False
+    pos.entry_credit_or_debit = 110.0
+    pos.profit_target_pct = 0.9
+    pos.stop_loss_level = 5.0
+    trade_client.get_order_by_id = lambda oid: SimpleNamespace(filled_avg_price=-1.25, status="filled")
+    data_client.get_option_latest_quote = lambda req: CONDOR_QUOTES
+
+    b.check_exits({"AAPL": 100.0})
+
+    assert pos.broker_fill_confirmed
+    assert pos.entry_credit_or_debit == pytest.approx(125.0)
+    assert pos.status == "open"

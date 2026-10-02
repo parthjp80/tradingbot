@@ -200,6 +200,10 @@ class AlpacaConfig:
     secret_key: str = field(default_factory=lambda: os.getenv("ALPACA_SECRET_KEY", ""))
     strike_match_window_pct: float = 0.15   # how far from the theoretical strike to search for a real listed one
     expiration_match_window_days: int = 5   # how many days of slack around the target DTE
+    # Entries are limit-priced at the real-quote mid; skip the trade if that
+    # mid credit is below this fraction of the theoretical credit the risk
+    # manager sized and approved it on.
+    min_market_to_theoretical_credit_ratio: float = 0.5
 
 
 @dataclass
